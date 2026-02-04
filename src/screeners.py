@@ -1,25 +1,34 @@
 """
 screeners.py
 ------------
-Defines swing trading screeners and stores signals in DB.
+Generates swing trading signals from indicators and raw prices
+and stores them in the signals table.
+
+Design goals:
+- NULL-safe
+- Idempotent per day
+- Explainable rules
+- Stable interface for run_eod.py
 """
 
 import pandas as pd
-
 from src.db_utils import get_connection
 
 
-# =============================
-# Screener Rules
-# =============================
+# ============================================================
+# Screener Rule Functions (ALL must be NULL-safe)
+# ============================================================
 
 def pullback_in_uptrend(row):
     """
-    Pullback in an uptrend:
+    Swing Pullback in Uptrend:
     - Price above EMA50
     - EMA20 above EMA50
     - RSI between 40 and 60
     """
+    if pd.isna(row["rsi"]) or pd.isna(row["ema20"]) or pd.isna(row["ema50"]):
+        return False
+
     return (
         row["close"] > row["ema50"]
         and row["ema20"] > row["ema50"]
@@ -29,23 +38,27 @@ def pullback_in_uptrend(row):
 
 def momentum_breakout(row):
     """
-    Momentum continuation:
-    - RSI > 60
-    - Close above EMA20
+    Momentum Continuation:
+    - RSI above 60
+    - Price above EMA20
     """
+    if pd.isna(row["rsi"]) or pd.isna(row["ema20"]):
+        return False
+
     return (
         row["rsi"] > 60
         and row["close"] > row["ema20"]
     )
 
 
-# =============================
-# Main Runner
-# =============================
+# ============================================================
+# Main Runner (Called by run_eod.py)
+# ============================================================
 
 def run_screeners():
     conn = get_connection()
 
+    # Join indicators with prices (EOD snapshot)
     df = pd.read_sql(
         """
         SELECT
@@ -70,37 +83,50 @@ def run_screeners():
         conn.close()
         return
 
+    # Drop rows where core indicators are missing
+    df = df.dropna(subset=["rsi", "ema20", "ema50", "close"])
+
+    if df.empty:
+        print("⚠️ No valid rows after indicator filtering.")
+        conn.close()
+        return
+
     signals = []
 
     for _, row in df.iterrows():
         trade_date = row["trade_date"].strftime("%Y-%m-%d")
+        symbol = row["symbol"]
 
-        # --- Pullback Screener ---
+        # -----------------------------
+        # Pullback in Uptrend
+        # -----------------------------
         if pullback_in_uptrend(row):
             signals.append(
                 (
                     trade_date,
-                    row["symbol"],
+                    symbol,
                     "PULLBACK_UPTREND",
                     1.0,
-                    row["close"],
+                    float(row["close"]),
                 )
             )
 
-        # --- Momentum Screener ---
+        # -----------------------------
+        # Momentum Breakout
+        # -----------------------------
         if momentum_breakout(row):
             signals.append(
                 (
                     trade_date,
-                    row["symbol"],
+                    symbol,
                     "MOMENTUM_BREAKOUT",
                     1.2,
-                    row["close"],
+                    float(row["close"]),
                 )
             )
 
     if not signals:
-        print("ℹ️ No swing signals generated today.")
+        print("ℹ️ No swing trade signals generated today.")
         conn.close()
         return
 
