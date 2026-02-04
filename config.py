@@ -5,3 +5,5 @@ STOCKS = [
     "INFY.NS",
     "HDFCBANK.NS",
 ]
+
+DATA_LOOKBACK_DAYS = 180
