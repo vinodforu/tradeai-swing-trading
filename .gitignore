@@ -1,5 +1,24 @@
+# Virtual environment
 venv/
+.env/
+
+# Python cache
 __pycache__/
+*.pyc
+
+# Databases
 *.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
 *.log
-.env
+
+# OS / Editor
+.DS_Store
+.vscode/
+
+# Data files (optional – your choice)
+data/raw/
+data/processed/
