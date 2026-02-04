@@ -1,33 +1,17 @@
-"""
-fetch_data.py
---------------
-Fetches End-of-Day (EOD) OHLCV data for a defined stock universe
-and stores raw data for downstream screening & AI pipelines.
-"""
-
 import os
 from datetime import datetime
+
 import pandas as pd
 import yfinance as yf
 
 from config import STOCKS, DATA_LOOKBACK_DAYS
-
-
-RAW_DATA_DIR = "data/raw"
-
-
-def ensure_dirs():
-    """Ensure required directories exist."""
-    os.makedirs(RAW_DATA_DIR, exist_ok=True)
+from src.db_utils import get_connection
 
 
 def fetch_eod_data():
     """
-    Fetch EOD data for all stocks in the universe.
-    Returns a dictionary: {symbol: DataFrame}
+    Fetch historical EOD data for all symbols.
     """
-    print("Fetching EOD market data...")
-
     data = yf.download(
         tickers=STOCKS,
         period=f"{DATA_LOOKBACK_DAYS}d",
@@ -36,55 +20,58 @@ def fetch_eod_data():
         auto_adjust=True,
         threads=True
     )
-
     return data
 
 
-def split_symbol_data(data):
+def insert_raw_price(trade_date, symbol, row):
     """
-    Split multi-ticker dataframe into per-symbol dataframes.
+    Insert one EOD candle into raw_prices table.
+    Idempotent because of PRIMARY KEY.
     """
-    symbol_dfs = {}
+    conn = get_connection()
+    cursor = conn.cursor()
 
-    for symbol in data.columns.levels[0]:
-        df = data[symbol].copy()
-        df.dropna(inplace=True)
+    cursor.execute(
+        """
+        INSERT OR REPLACE INTO raw_prices
+        (trade_date, symbol, open, high, low, close, volume)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            trade_date,
+            symbol,
+            float(row["Open"]),
+            float(row["High"]),
+            float(row["Low"]),
+            float(row["Close"]),
+            int(row["Volume"]),
+        ),
+    )
 
-        if len(df) < 50:
-            # Not enough data for indicators
-            continue
-
-        df.reset_index(inplace=True)
-        df["symbol"] = symbol
-
-        symbol_dfs[symbol] = df
-
-    return symbol_dfs
-
-
-def save_raw_data(symbol_dfs):
-    """
-    Save raw OHLCV data to CSV (one file per symbol per day).
-    """
-    trade_date = datetime.now().strftime("%Y-%m-%d")
-
-    for symbol, df in symbol_dfs.items():
-        file_name = f"{symbol.replace('.', '_')}_{trade_date}.csv"
-        file_path = os.path.join(RAW_DATA_DIR, file_name)
-
-        df.to_csv(file_path, index=False)
-
-    print(f"Saved raw data for {len(symbol_dfs)} symbols.")
+    conn.commit()
+    conn.close()
 
 
 def run():
-    ensure_dirs()
-
+    print("📥 Fetching EOD data...")
     data = fetch_eod_data()
-    symbol_dfs = split_symbol_data(data)
-    save_raw_data(symbol_dfs)
 
-    print("EOD data fetch completed successfully.")
+    inserted = 0
+
+    for symbol in data.columns.levels[0]:
+        df = data[symbol].dropna()
+
+        if df.empty:
+            continue
+
+        # Take the latest completed candle
+        latest_row = df.iloc[-1]
+        trade_date = latest_row.name.strftime("%Y-%m-%d")
+
+        insert_raw_price(trade_date, symbol, latest_row)
+        inserted += 1
+
+    print(f"✅ Inserted EOD data for {inserted} symbols.")
 
 
 if __name__ == "__main__":
